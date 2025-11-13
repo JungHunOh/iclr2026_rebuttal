@@ -1,0 +1,73 @@
+{
+  "os":  "Linux-5.15.0-139-generic-x86_64-with-glibc2.31",
+  "python":  "CPython 3.12.9",
+  "startedAt":  "2025-07-27T11:44:53.978336Z",
+  "args":  [
+    "--base_model",
+    "meta-llama/Meta-Llama-3-8B",
+    "--data_path",
+    "./ft-training_set/commonsense_170k.json",
+    "--output_dir",
+    "./trained_models/llama3_commonsense_170k_epoch3_lora_r16_scale8_lr0.0002_seed1/",
+    "--batch_size",
+    "32",
+    "--micro_batch_size",
+    "16",
+    "--num_epochs",
+    "3",
+    "--learning_rate",
+    "0.0002",
+    "--cutoff_len",
+    "256",
+    "--val_set_size",
+    "0",
+    "--adapter_name",
+    "lora",
+    "--lora_r",
+    "16",
+    "--lora_alpha",
+    "32.0",
+    "--prepare_ratio",
+    "0.25",
+    "--target_modules",
+    "q_proj,k_proj,v_proj,up_proj,down_proj"
+  ],
+  "program":  "/home/dh6dh/workspace/next/commonsense/finetune.py",
+  "codePath":  "finetune.py",
+  "codePathLocal":  "finetune.py",
+  "email":  "dh6dh@snu.ac.kr",
+  "root":  "/home/dh6dh/workspace/next/commonsense",
+  "host":  "Xanthos",
+  "executable":  "/home/dh6dh/anaconda3/envs/lora/bin/python",
+  "cpu_count":  20,
+  "cpu_count_logical":  40,
+  "gpu":  "NVIDIA A100 80GB PCIe",
+  "gpu_count":  2,
+  "disk":  {
+    "/":  {
+      "total":  "1967316500480",
+      "used":  "1708899590144"
+    }
+  },
+  "memory":  {
+    "total":  "404088623104"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA A100 80GB PCIe",
+      "memoryTotal":  "85899345920",
+      "cudaCores":  6912,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-5856bd83-54f6-8c51-8e9c-722a455de7fc"
+    },
+    {
+      "name":  "NVIDIA A100 80GB PCIe",
+      "memoryTotal":  "85899345920",
+      "cudaCores":  6912,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-56ddf274-97bb-5df4-38bc-b45abca20ce4"
+    }
+  ],
+  "cudaVersion":  "12.2",
+  "writerId":  "xjuk79t90f2je2dgo3n73lbja6h40d5p"
+}
