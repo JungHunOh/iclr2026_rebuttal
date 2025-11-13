@@ -3,6 +3,7 @@ import torch
 import math
 import random
 from torch.utils.data import SequentialSampler
+from torch.optim._functional import adamw as functional_adamw
 
 class CustomLoRATrainer(Trainer):
     def __init__(self, *args, **kwargs):
@@ -57,7 +58,7 @@ class CustomLoRATrainer(Trainer):
                     'amsgrad': getattr(self.optimizer, 'amsgrad', False)
                 }
                 new_param_groups.append(group_copy_b)
-            elif len(group['params']) > 10 and 'scaledadam' in self.args.output_dir:
+            elif len(group['params']) > 10:
                 for module in self.model.modules():
                     if hasattr(module, 'lora_A'):
                         group_copy = {
@@ -79,7 +80,7 @@ class CustomLoRATrainer(Trainer):
                     'amsgrad': getattr(self.optimizer, 'amsgrad', False)
                 }
                 new_param_groups.append(group_copy)
-        
+
         mode = self.args.output_dir.split('_')[-2]
         assert type(self.optimizer) is torch.optim.AdamW, "only support AdamW optimizer"
         self.optimizer = CustomAdamW(
@@ -123,9 +124,9 @@ class CustomAdamW(torch.optim.AdamW):
                         del module.prev_a
                         del module.prev_b
                     elif 'odlora' in self.mode:
-                        module.do_one = True
-                        torch.nn.init.zeros_(module.lora_A['default'].weight)
-                        torch.nn.init.zeros_(module.lora_B['default'].weight)
+                        if hasattr(module, 'proj_a'):
+                            torch.nn.init.zeros_(module.lora_A['default'].weight)
+                            torch.nn.init.zeros_(module.lora_B['default'].weight)
                     elif 'lorauniform' in self.mode:
                         module.lora_B['default'].weight.data = module.detached_b.clone().contiguous()
                         module.lora_A['default'].weight.data = module.detached_a.clone().contiguous()
@@ -144,93 +145,170 @@ class CustomAdamW(torch.optim.AdamW):
 
     def step(self, closure=None):
         self._step_count += 1
-        if 'scaledadam' in self.mode:
-            loss = None
-            if closure is not None:
-                with torch.enable_grad():
-                    loss = closure()
+
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        
+        with torch.no_grad():
             for group in self.param_groups[:-1]:
+                params_with_grad = []
+                grads = []
+                exp_avgs = []
+                exp_avg_sqs = []
+                state_steps = []
+                max_exp_avg_sqs = []
+
                 A, B = group['params']
-                dA, dB = A.grad.data, B.grad.data
+
+                if A.grad is None or B.grad is None:
+                    continue
+
+                dA, dB = A.grad, B.grad
+
+                params_with_grad.append(A)
                 
                 state_A = self.state[A]
-                state_B = self.state[B]
-
-                if len(state_A) == 0 and len(state_B) == 0:
+                
+                if len(state_A) == 0:
                     state_A['step'] = 0
                     state_A['exp_avg'] = torch.zeros_like(A.data)
                     state_A['exp_avg_sq'] = torch.zeros_like(A.data)
-                    state_B['step'] = 0
-                    state_B['exp_avg'] = torch.zeros_like(B.data)
-                    state_B['exp_avg_sq'] = torch.zeros_like(B.data)
                 
                 exp_avg_A, exp_avg_sq_A = state_A['exp_avg'], state_A['exp_avg_sq']
-                exp_avg_B, exp_avg_sq_B = state_B['exp_avg'], state_B['exp_avg_sq']
                 beta1, beta2 = group['betas']
                 state_A['step'] += 1
-                state_B['step'] += 1
 
-                try:
-                    dA_scaled = torch.inverse(B.data.T @ B.data + 1e-6 * torch.eye(B.data.shape[1], device=B.data.device)) @ dA
-                except:
-                    dA_scaled = torch.eye((B.data.T @ B.data).shape[0], device=B.data.device) @ dA
-                
-                try:
-                    dB_scaled = dB @ torch.inverse(A.data @ A.data.T + 1e-6 * torch.eye(A.data.shape[0], device=A.data.device))
-                except:
-                    dB_scaled = dB @ torch.eye((A.data @ A.data.T).shape[0], device=A.data.device)
-                #dA_scaled = torch.eye((B.T @ B).shape[0], device=B.device) @ dA
-                #dB_scaled = dB @ torch.eye((A @ A.T).shape[0], device=A.device)
+                if 'scaledadam' in self.mode and 'noscale' not in self.mode:
+                    try:
+                        dA_scaled = torch.inverse(B.data.T @ B.data + 1e-6 * torch.eye(B.data.shape[1], device=B.data.device)) @ dA.data
+                    except:
+                        dA_scaled = torch.eye(B.data.shape[1], device=B.data.device) @ dA.data
+                else:
+                    dA_scaled = dA.data
                 
                 assert dA_scaled.shape == dA.data.shape
-                assert dB_scaled.shape == dB.data.shape
                 
                 exp_avg_A.mul_(beta1).add_(dA_scaled, alpha=1 - beta1)
                 exp_avg_sq_A.mul_(beta2).addcmul_(dA_scaled, dA_scaled, value=1 - beta2)
                 denom_A = exp_avg_sq_A.sqrt().add_(group['eps'])
 
+                grads.append(dA_scaled)
+                exp_avgs.append(exp_avg_A)
+                exp_avg_sqs.append(exp_avg_sq_A)
+                state_steps.append(torch.tensor(state_A['step'], device=A.data.device, dtype=torch.float32))
+                #A.data.addcdiv_(exp_avg_A, denom_A, value=-step_size)
+
+                params_with_grad.append(B)
+
+                state_B = self.state[B]
+                if len(state_B) == 0:
+                    state_B['step'] = 0
+                    state_B['exp_avg'] = torch.zeros_like(B.data)
+                    state_B['exp_avg_sq'] = torch.zeros_like(B.data)
+                
+                exp_avg_B, exp_avg_sq_B = state_B['exp_avg'], state_B['exp_avg_sq']
+                state_B['step'] += 1
+
+                if 'scaledadam' in self.mode and 'noscale' not in self.mode:
+                    try:
+                        dB_scaled = dB.data @ torch.inverse(A.data @ A.data.T + 1e-6 * torch.eye(A.data.shape[0], device=A.data.device))
+                    except:
+                        dB_scaled = dB.data @ torch.eye(A.data.shape[0], device=A.data.device)
+                else:
+                    dB_scaled = dB.data
+
+                assert dB_scaled.shape == dB.data.shape
+
                 exp_avg_B.mul_(beta1).add_(dB_scaled, alpha=1 - beta1)
                 exp_avg_sq_B.mul_(beta2).addcmul_(dB_scaled, dB_scaled, value=1 - beta2)
                 denom_B = exp_avg_sq_B.sqrt().add_(group['eps'])
 
-                step_size = group['lr']
+                grads.append(dB_scaled)
+                exp_avgs.append(exp_avg_B)
+                exp_avg_sqs.append(exp_avg_sq_B)
+                state_steps.append(torch.tensor(state_B['step'], device=B.data.device, dtype=torch.float32))
 
-                A.data.addcdiv_(-step_size, exp_avg_A, denom_A)
-                B.data.addcdiv_(-step_size, exp_avg_B, denom_B)
+                #B.data.addcdiv_(exp_avg_B, denom_B, value=-step_size)
 
-            for p in self.param_groups[-1]['params']:
-                if p.grad is None:
-                    continue
-                grad = p.grad
+                functional_adamw(
+                    params_with_grad,
+                    grads,
+                    exp_avgs,
+                    exp_avg_sqs,
+                    max_exp_avg_sqs,
+                    state_steps,
+                    amsgrad=group['amsgrad'],
+                    beta1=beta1,
+                    beta2=beta2,
+                    lr=group['lr'],
+                    weight_decay=group['weight_decay'],
+                    eps=group['eps'],
+                    maximize=group.get('maximize', False),
+                    foreach=group.get('foreach', None),
+                    capturable=group.get('capturable', False),
+                    differentiable=group.get('differentiable', False)
+                )
 
-                state = self.state[p]
 
-                # State initialization
-                if len(state) == 0:
-                    state['step'] = 0
-                    # Exponential moving average of gradient values
-                    state['exp_avg'] = torch.zeros_like(p.data)
-                    # Exponential moving average of squared gradient values
-                    state['exp_avg_sq'] = torch.zeros_like(p.data)
+        for p in self.param_groups[-1]['params']:
+            params_with_grad = []
+            grads = []
+            exp_avgs = []
+            exp_avg_sqs = []
+            state_steps = []
+            max_exp_avg_sqs = []
 
-                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
-                beta1, beta2 = self.param_groups[-1]['betas']
+            if p.grad is None:
+                continue
+            grad = p.grad
 
-                state['step'] += 1
+            state = self.state[p]
 
-                # Decay the first and second moment running average coefficient
-                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+            # State initialization
+            if len(state) == 0:
+                state['step'] = 0
+                # Exponential moving average of gradient values
+                state['exp_avg'] = torch.zeros_like(p.data)
+                # Exponential moving average of squared gradient values
+                state['exp_avg_sq'] = torch.zeros_like(p.data)
 
-                denom = exp_avg_sq.sqrt().add_(self.param_groups[-1]['eps'])
+            exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+            beta1, beta2 = self.param_groups[-1]['betas']
 
-                step_size = self.param_groups[-1]['lr']
+            state['step'] += 1
 
-                p.data.addcdiv_(-step_size, exp_avg, denom)
-                
-            return loss
+            # Decay the first and second moment running average coefficient
+            exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
-        loss = super().step(closure)
+            denom = exp_avg_sq.sqrt().add_(self.param_groups[-1]['eps'])
+
+            step_size = self.param_groups[-1]['lr']
+
+            #p.data.addcdiv_(-step_size, exp_avg, denom)
+
+            functional_adamw(
+                [p],
+                [grad],
+                [exp_avg],
+                [exp_avg_sq],
+                max_exp_avg_sqs,
+                [torch.tensor(state['step'], device=p.data.device, dtype=torch.float32)],
+                amsgrad=self.param_groups[-1]['amsgrad'],
+                beta1=beta1,
+                beta2=beta2,
+                lr=step_size,
+                weight_decay=self.param_groups[-1]['weight_decay'],
+                eps=self.param_groups[-1]['eps'],
+                maximize=self.param_groups[-1].get('maximize', False),
+                foreach=self.param_groups[-1].get('foreach', None),
+                capturable=self.param_groups[-1].get('capturable', False),
+                differentiable=self.param_groups[-1].get('differentiable', False)
+            )
+            
+        #loss = super().step(closure)
 
         if self._step_count % 10 == 0 and self.before_init:
             for module in self.model.modules():
@@ -288,7 +366,11 @@ class CustomAdamW(torch.optim.AdamW):
                         lora_A = module.lora_A['default'].weight
                         lora_B = module.lora_B['default'].weight
                         if self._step_count == 10:
-                            u, s, v = torch.svd_lowrank(lora_B @ module.proj_a + module.proj_b @ lora_A, q=module.lora_A['default'].weight.shape[0]+10, niter=4)
+                            if hasattr(module, 'proj_a') and hasattr(module, 'proj_b'):
+                                u, s, v = torch.svd_lowrank(lora_B @ module.proj_a + module.proj_b @ lora_A, q=module.lora_A['default'].weight.shape[0]+10, niter=4)
+                            else:
+                                u, s, v = torch.svd_lowrank(lora_B @ lora_A, q=module.lora_A['default'].weight.shape[0]+10, niter=4)
+                                module.do_one = True
                             u = u[:,:-10]
                             s = s[:-10]
                             v = v[:,:-10]

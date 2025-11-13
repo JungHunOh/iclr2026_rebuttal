@@ -289,7 +289,7 @@ def train(
         model.is_parallelizable = True
         model.model_parallel = True
 
-    if 'odlora' in output_dir or 'lorauniform' in output_dir:
+    if ('odlora' in output_dir or 'lorauniform' in output_dir) and 'noinit' not in output_dir:
         assert max_steps > 0
         trainer = Trainer(
             model=model,
@@ -333,7 +333,7 @@ def train(
         args=transformers.TrainingArguments(
             per_device_train_batch_size=micro_batch_size,
             gradient_accumulation_steps=gradient_accumulation_steps,
-            warmup_steps=0,
+            warmup_ratio=0,
             num_train_epochs=num_epochs,
             learning_rate=learning_rate,
             fp16=False,
