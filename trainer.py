@@ -2,99 +2,83 @@ from transformers import Trainer
 import torch
 import math
 import random
-from torch.utils.data import SequentialSampler
+from torch.utils.data import SequentialSampler, DataLoader
 from torch.optim._functional import adamw as functional_adamw
 
 class CustomLoRATrainer(Trainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
     
-    def create_optimizer_and_scheduler(self, num_training_steps: int):
-        """
-        Setup the optimizer and the learning rate scheduler.
+    def get_train_dataloader(self):
+        mode = self.args.output_dir.split('_')[-2]
 
-        We provide a reasonable default that works well. If you want to use something else, you can pass a tuple in the
-        Trainer's init through `optimizers`, or subclass and override this method (or `create_optimizer` and/or
-        `create_scheduler`) in a subclass.
-        """
-        if self.optimizer is None:
-            self.create_optimizer()
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset.")
+
+        train_dataset = self.train_dataset
         
-        param_groups = self.optimizer.param_groups
-        assert len(param_groups) > 0
+        train_sampler = SequentialSampler(train_dataset)
 
+        return DataLoader(
+            train_dataset,
+            batch_size=self.args.train_batch_size,
+            sampler=train_sampler,
+            collate_fn=self.data_collator,
+            drop_last=self.args.dataloader_drop_last,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+        )
+    
+    def create_optimizer_and_scheduler(self, num_training_steps: int):
+        mode = self.args.output_dir.split('_')[-2]
 
-        if 'lora+' in self.args.output_dir:
-            lora_A_params = []
-            lora_B_params = []
+        if 'lorapro' in mode:
+            super().create_optimizer_and_scheduler(num_training_steps)
+        else:
+            if self.optimizer is None:
+                self.create_optimizer()
+            
+            param_groups = self.optimizer.param_groups
+            assert len(param_groups) > 0
+
+            new_param_groups = []
             for group in param_groups:
                 if len(group['params']) > 10:
-                    for p in group['params']:
-                        if hasattr(p, 'shape') and len(p.shape) == 2:
-                            if p.shape[0] < p.shape[1]:
-                                lora_A_params.append(p)
-                            else:
-                                lora_B_params.append(p)
+                    for module in self.model.modules():
+                        if hasattr(module, 'lora_A'):
+                            group_copy = {
+                                'params': [module.lora_A['default'].weight, module.lora_B['default'].weight],
+                                'lr': group.get('lr', 1e-3),
+                                'betas': group.get('betas', (0.9, 0.999)),
+                                'eps': group.get('eps', 1e-8),
+                                'weight_decay': group.get('weight_decay', 0.0),
+                                'amsgrad': getattr(self.optimizer, 'amsgrad', False)
+                            }
+                            new_param_groups.append(group_copy)
+                else:
+                    group_copy = {
+                        'params': group['params'],
+                        'lr': group.get('lr', 1e-3),
+                        'betas': group.get('betas', (0.9, 0.999)),
+                        'eps': group.get('eps', 1e-8),
+                        'weight_decay': group.get('weight_decay', 0.0),
+                        'amsgrad': getattr(self.optimizer, 'amsgrad', False)
+                    }
+                    new_param_groups.append(group_copy)
 
+            assert type(self.optimizer) is torch.optim.AdamW, "only support AdamW optimizer"
+            self.optimizer = CustomAdamW(
+                new_param_groups,
+                total_steps=num_training_steps,
+                model=self.model,
+                mode=mode,
+                before_init=self.args.max_steps > 0
+            )
 
-        new_param_groups = []
-        for group in param_groups:
-            if len(group['params']) > 10 and 'lora+' in self.args.output_dir:
-                group_copy_a = {
-                    'params': lora_A_params,
-                    'lr': group.get('lr', 1e-3),
-                    'betas': group.get('betas', (0.9, 0.999)),
-                    'eps': group.get('eps', 1e-8),
-                    'weight_decay': group.get('weight_decay', 0.0),
-                    'amsgrad': getattr(self.optimizer, 'amsgrad', False)
-                }
-                new_param_groups.append(group_copy_a)
-                group_copy_b = {
-                    'params': lora_B_params,
-                    'lr': group.get('lr', 1e-3) * 4,
-                    'betas': group.get('betas', (0.9, 0.999)),
-                    'eps': group.get('eps', 1e-8),
-                    'weight_decay': group.get('weight_decay', 0.0),
-                    'amsgrad': getattr(self.optimizer, 'amsgrad', False)
-                }
-                new_param_groups.append(group_copy_b)
-            elif len(group['params']) > 10:
-                for module in self.model.modules():
-                    if hasattr(module, 'lora_A'):
-                        group_copy = {
-                            'params': [module.lora_A['default'].weight, module.lora_B['default'].weight],
-                            'lr': group.get('lr', 1e-3),
-                            'betas': group.get('betas', (0.9, 0.999)),
-                            'eps': group.get('eps', 1e-8),
-                            'weight_decay': group.get('weight_decay', 0.0),
-                            'amsgrad': getattr(self.optimizer, 'amsgrad', False)
-                        }
-                        new_param_groups.append(group_copy)
+            if self.args.max_steps > 0:
+                self.lr_scheduler = NoScheduling(self.optimizer)
             else:
-                group_copy = {
-                    'params': group['params'],
-                    'lr': group.get('lr', 1e-3),
-                    'betas': group.get('betas', (0.9, 0.999)),
-                    'eps': group.get('eps', 1e-8),
-                    'weight_decay': group.get('weight_decay', 0.0),
-                    'amsgrad': getattr(self.optimizer, 'amsgrad', False)
-                }
-                new_param_groups.append(group_copy)
-
-        mode = self.args.output_dir.split('_')[-2]
-        assert type(self.optimizer) is torch.optim.AdamW, "only support AdamW optimizer"
-        self.optimizer = CustomAdamW(
-            new_param_groups,
-            total_steps=num_training_steps,
-            model=self.model,
-            mode=mode,
-            before_init=self.args.max_steps > 0
-        )
-
-        if self.args.max_steps > 0:
-            self.lr_scheduler = NoScheduling(self.optimizer)
-        else:
-            self.create_scheduler(num_training_steps=num_training_steps, optimizer=self.optimizer)
+                self.create_scheduler(num_training_steps=num_training_steps, optimizer=self.optimizer)
 
 class CustomAdamW(torch.optim.AdamW):
     def __init__(self, params, total_steps, model=None, mode='base', before_init=False, **kwargs):
@@ -117,31 +101,10 @@ class CustomAdamW(torch.optim.AdamW):
                 if not hasattr(module, 'layer_idx'):
                     module.layer_idx = layer
                     layer += 1
-                if not self.before_init and ('lorauniform' in self.mode or 'odlora' in self.mode):
-                    if self.mode == 'oursnewinitnoproj':
-                        module.lora_B['default'].weight.data = module.detached_b.clone().contiguous()
-                        module.lora_A['default'].weight.data = module.detached_a.clone().contiguous()
-                        del module.prev_a
-                        del module.prev_b
-                    elif 'odlora' in self.mode:
-                        if hasattr(module, 'proj_a'):
-                            torch.nn.init.zeros_(module.lora_A['default'].weight)
-                            torch.nn.init.zeros_(module.lora_B['default'].weight)
-                    elif 'lorauniform' in self.mode:
-                        module.lora_B['default'].weight.data = module.detached_b.clone().contiguous()
-                        module.lora_A['default'].weight.data = module.detached_a.clone().contiguous()
-                    else:
-                        module.proj_a = module.detached_a.clone().contiguous()
-                        module.proj_b = module.detached_b.clone().contiguous()
-                        module.lora_B['default'].weight.data = module.detached_b.clone().contiguous()
-                        module.lora_A['default'].weight.data = module.detached_a.clone().contiguous()
-                        #torch.nn.init.zeros_(module.lora_A['default'].weight)
-                        #torch.nn.init.zeros_(module.lora_B['default'].weight)
-                        module.base_layer.weight.data = module.base_layer.weight - (module.detached_b @ module.detached_a).to(module.base_layer.weight.dtype) * module.scaling['default']
-                        del module.prev_a
-                        del module.prev_b
-                        del module.detached_a
-                        del module.detached_b
+                if not self.before_init and 'odlora' in self.mode:
+                    if hasattr(module, 'proj_a'):
+                        torch.nn.init.zeros_(module.lora_A['default'].weight)
+                        torch.nn.init.zeros_(module.lora_B['default'].weight)
 
     def step(self, closure=None):
         self._step_count += 1
@@ -251,7 +214,6 @@ class CustomAdamW(torch.optim.AdamW):
                     differentiable=group.get('differentiable', False)
                 )
 
-
         for p in self.param_groups[-1]['params']:
             params_with_grad = []
             grads = []
@@ -266,12 +228,9 @@ class CustomAdamW(torch.optim.AdamW):
 
             state = self.state[p]
 
-            # State initialization
             if len(state) == 0:
                 state['step'] = 0
-                # Exponential moving average of gradient values
                 state['exp_avg'] = torch.zeros_like(p.data)
-                # Exponential moving average of squared gradient values
                 state['exp_avg_sq'] = torch.zeros_like(p.data)
 
             exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
@@ -279,15 +238,12 @@ class CustomAdamW(torch.optim.AdamW):
 
             state['step'] += 1
 
-            # Decay the first and second moment running average coefficient
             exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
             exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
             denom = exp_avg_sq.sqrt().add_(self.param_groups[-1]['eps'])
 
             step_size = self.param_groups[-1]['lr']
-
-            #p.data.addcdiv_(-step_size, exp_avg, denom)
 
             functional_adamw(
                 [p],
@@ -308,8 +264,6 @@ class CustomAdamW(torch.optim.AdamW):
                 differentiable=self.param_groups[-1].get('differentiable', False)
             )
             
-        #loss = super().step(closure)
-
         if self._step_count % 10 == 0 and self.before_init:
             for module in self.model.modules():
                 if hasattr(module, 'lora_A'):
@@ -347,17 +301,6 @@ class CustomAdamW(torch.optim.AdamW):
                                 if p.requires_grad:
                                     p.data = p_init.data.clone().contiguous()
                         self.state.clear()
-
-        if not self.before_init and 'lorauniform' in self.mode:
-            for module in self.model.modules():
-                if hasattr(module, 'lora_A'):
-                    with torch.no_grad():
-                        lora_A = module.lora_A['default'].weight
-                        lora_B = module.lora_B['default'].weight
-                        Q_A, R_A = torch.linalg.qr(lora_A.T, mode='reduced')
-                        Q_B, R_B = torch.linalg.qr(lora_B, mode='reduced')
-                        module.lora_A['default'].weight.data = (Q_A * torch.sign(torch.diag(R_A))).T.clone().contiguous()
-                        module.lora_B['default'].weight.data = (Q_B * torch.sign(torch.diag(R_B))).clone().contiguous()
 
         if not self.before_init and 'odlora' in self.mode and self._step_count % self.interval == 0:
             for module in self.model.modules():

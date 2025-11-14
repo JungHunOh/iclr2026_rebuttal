@@ -6,7 +6,7 @@ print('PID:', os.getpid())
 print('enter gpu')
 gpu=input()
 
-for model in ['llama3','gemma']:
+for model in ['llama3']:
 
     if model == 'gemma':
         base_model = 'google/gemma-2b'
@@ -22,40 +22,27 @@ for model in ['llama3','gemma']:
 
     if model == 'llama3':
         lr = 1e-4
+        mini_bs = 8
     elif model == 'llama2':
         lr = 2e-4
+        mini_bs = 8
     elif model == 'gemma':
-        lr = 2e-4
+        lr = 2e-5
+        mini_bs = 16
 
     epoch=1
     for seed in [1]:
         for target_modules in ['q_proj k_proj v_proj down_proj up_proj o_proj gate_proj']:
             target_modules_name = target_modules.replace(' ', '').replace('_proj','')
-            for r, scale in [(32,4)]:
-                for method in ['base', 'fullft', 'odlora', 'odlorascaling']:
-                #for method in ['odlora']:
-                    if 'dora' in method:
-                        if model == 'llama3':
-                            mini_bs=4
-                        else:
-                            mini_bs=8
-                    else:
-                        if model == 'llama3' or model == 'llama2':
-                            mini_bs=8
-                        else:
-                            mini_bs=16
-                    if 'odlora' in method or 'lorauniform' in method:
+            for r, scale in [(8,4), (32,4)]:
+                for method in ['base', 'loraga', 'lorapro', 'odlora']:
+                    if 'lorapro' in meathod:
+                        mini_bs = mini_bs // 2
+
+                    if 'odlora' in method:
                         max_steps = 50
                     else:
                         max_steps = -1
-                    
-                    if 'fullft' in method:
-                        if model == 'llama3':
-                            mini_bs = 1
-                            lr = 5e-6
-                        else:
-                            mini_bs = 8
-                            lr = 1e-5
                     
                     num_gpus = len(gpu.split(','))
 
@@ -90,4 +77,3 @@ for model in ['llama3','gemma']:
                         | tee ./trained_models/{model}_{dataset}_epoch{epoch}_bs{bs}_r{r}_scale{scale}_lr{lr}_seed{seed}_{method}_{target_modules_name}/log.txt\
                         ')
                     print(f'./trained_models/{model}_{dataset}_epoch{epoch}_bs{bs}_r{r}_scale{scale}_lr{lr}_seed{seed}_{method}_{target_modules_name}/')
-input()

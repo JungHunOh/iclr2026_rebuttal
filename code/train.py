@@ -12,6 +12,7 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 
+import os
 import copy
 import logging
 from dataclasses import dataclass, field
@@ -56,11 +57,7 @@ class ModelArguments:
     lora_r: int = field(default=16, metadata={"help": "Lora rank."})
     lora_alpha: float = field(default=16.0, metadata={"help": "Lora alpha."})
 
-    target_modules: List[str] = field(
-        default_factory=list,
-        metadata={"help": "Target modules for finetuning"},
-    )
-
+    target_modules: str = field(default="q_proj,k_proj,v_proj,down_proj,up_proj,o_proj,gate_proj")
 
 @dataclass
 class DataArguments:
@@ -141,7 +138,7 @@ def preprocess(
 
 
 class SupervisedDataset(Dataset):
-    """Dataset for supervised fine-tuning."""
+    """Dataset for supervised fine-tuning. Supports integer indexing, slicing and index lists."""
 
     def __init__(self, data_path: str, tokenizer: transformers.PreTrainedTokenizer):
         super(SupervisedDataset, self).__init__()
@@ -165,12 +162,31 @@ class SupervisedDataset(Dataset):
     def __len__(self):
         return len(self.input_ids)
 
-    def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        return dict(input_ids=self.input_ids[i], labels=self.labels[i])
+    def __getitem__(self, idx):
+        # integer index
+        if isinstance(idx, int):
+            if idx < 0:
+                idx += len(self)
+            return dict(input_ids=self.input_ids[idx], labels=self.labels[idx])
+
+        # slice
+        if isinstance(idx, slice):
+            indices = range(*idx.indices(len(self)))
+            return [self[i] for i in indices]
+
+        # list/tuple/ndarray/tensor of indices
+        if isinstance(idx, (list, tuple, np.ndarray, torch.Tensor)):
+            if isinstance(idx, (np.ndarray, torch.Tensor)):
+                idx = list(idx.tolist())
+            return [self[i] for i in idx]
+
+        raise TypeError(f"Unsupported index type: {type(idx)}")
 
 
 class SupervisedHFDataset(Dataset):
-    """Dataset for supervised fine-tuning from a HuggingFace datasets.Dataset object."""
+    """Dataset for supervised fine-tuning from a HuggingFace datasets.Dataset object.
+    Supports integer indexing, slicing and index lists/arrays/tensors.
+    """
 
     def __init__(self, hf_dataset, tokenizer: transformers.PreTrainedTokenizer):
         super().__init__()
@@ -196,8 +212,25 @@ class SupervisedHFDataset(Dataset):
     def __len__(self):
         return len(self.input_ids)
 
-    def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        return dict(input_ids=self.input_ids[i], labels=self.labels[i])
+    def __getitem__(self, idx):
+        # integer index
+        if isinstance(idx, int):
+            if idx < 0:
+                idx += len(self)
+            return dict(input_ids=self.input_ids[idx], labels=self.labels[idx])
+
+        # slice
+        if isinstance(idx, slice):
+            indices = range(*idx.indices(len(self)))
+            return [self[i] for i in indices]
+
+        # list/tuple/ndarray/tensor of indices
+        if isinstance(idx, (list, tuple, np.ndarray, torch.Tensor)):
+            if isinstance(idx, (np.ndarray, torch.Tensor)):
+                idx = list(idx.tolist())
+            return [self[i] for i in idx]
+
+        raise TypeError(f"Unsupported index type: {type(idx)}")
 
 
 @dataclass
@@ -234,7 +267,7 @@ def make_supervised_hf_data_module(tokenizer: transformers.PreTrainedTokenizer, 
 
 def train():
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    model_args, data_args, training_args, remaining_args = parser.parse_args_into_dataclasses(return_remaining_strings=True)
 
     random.seed(training_args.seed)
     np.random.seed(training_args.seed)
@@ -271,25 +304,62 @@ def train():
         model=model,
     )
 
+    if data_args.dataset == 'codefeedback':
+        from datasets import load_dataset
+        train_dataset = load_dataset("m-a-p/CodeFeedback-Filtered-Instruction", split='train')
+        data_module = make_supervised_hf_data_module(tokenizer=tokenizer, hf_dataset=train_dataset)
+
     if 'norslora' in training_args.output_dir:
         model_args.lora_alpha = model_args.lora_r * 2
+    
+    if 'loraga' in training_args.output_dir:
+        from lora_ga import LoraGAConfig
+        from lora_ga import get_peft_model as loraga_get_peft_model
+        from accelerate import Accelerator
+        from lora_ga.utils.lora_ga_utils import estimate_gradient, LoraGAContext
+        from torch.utils.data import DataLoader
 
-    lora_config = LoraConfig(
-        r=model_args.lora_r,
-        lora_alpha=model_args.lora_alpha,
-        target_modules=model_args.target_modules,
-        lora_dropout=0.05,
-        bias="none",
-        task_type="CAUSAL_LM",
-        init_lora_weights=True if 'pissa' not in training_args.output_dir else 'pissa_niter_4',
-        use_dora=True if 'dora' in training_args.output_dir else False,
-        use_rslora=True if 'norslora' not in training_args.output_dir else False,
-    )
+        config = LoraGAConfig(
+            r=model_args.lora_r,
+            lora_alpha=model_args.lora_alpha,
+            target_modules=model_args.target_modules.split(','),
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM",
+            init_lora_weights=True if 'pissa' not in training_args.output_dir else 'pissa_niter_4',
+            use_dora=True if 'dora' in training_args.output_dir else False,
+            use_rslora=True if 'norslora' not in training_args.output_dir else False,
+            iters=32 // 2,
+        )
 
-    model = get_peft_model(model, lora_config)
+        temp_set = data_module['train_dataset'][:32]
+
+        named_grad = estimate_gradient(
+            model=model,
+            dataloader=DataLoader(temp_set, shuffle=False, batch_size=2, collate_fn=data_module['data_collator']),
+            accelerator=Accelerator(),
+            quant_flag=False,
+        )
+        with LoraGAContext(model=model, named_grad=named_grad):
+            model = loraga_get_peft_model(model=model, peft_config=config)
+    else:
+        lora_config = LoraConfig(
+            r=model_args.lora_r,
+            lora_alpha=model_args.lora_alpha,
+            target_modules=model_args.target_modules.split(','),
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM",
+            init_lora_weights=True if 'pissa' not in training_args.output_dir else 'pissa_niter_4',
+            use_dora=True if 'dora' in training_args.output_dir else False,
+            use_rslora=True if 'norslora' not in training_args.output_dir else False,
+        )
+
+        model = get_peft_model(model, lora_config)
+
     if 'fullft' in training_args.output_dir:
         for name, param in model.named_parameters():
-            if any(target in name for target in model_args.target_modules):
+            if any(target in name for target in model_args.target_modules) and 'lora' not in name:
                 param.requires_grad = True
             else:
                 param.requires_grad = False
@@ -298,16 +368,7 @@ def train():
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total Parameters: {total_params}")
     print(f"Trainable Parameters: {trainable_params}, Ratio: {100 * trainable_params / total_params:.2f}%")
-
-    if data_args.dataset == 'codefeedback':
-        from datasets import load_dataset
-        train_dataset = load_dataset("m-a-p/CodeFeedback-Filtered-Instruction", split='train')
-        data_module = make_supervised_hf_data_module(tokenizer=tokenizer, hf_dataset=train_dataset)
         
-    elif data_args.dataset == 'alpaca':
-        data_args.data_path = './alpaca_data.json'
-        data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
-    
     if 'odlora' in training_args.output_dir or 'lorauniform' in training_args.output_dir:
         assert training_args.max_steps > 0
         trainer = Trainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
@@ -316,11 +377,19 @@ def train():
         assert training_args.max_steps == -1
 
     training_args.max_steps = -1
+    if 'lorapro' in training_args.output_dir:
+        ds_config = "../config/deepspeed_zero2.json"
+        ds_config = os.path.abspath(os.path.expanduser(ds_config))
+        assert os.path.isfile(ds_config), f"Deepspeed config not found: {ds_config}"
+        training_args.deepspeed = ds_config
+        training_args.optim = 'sgd'
+        training_args = TrainingArguments(**training_args.to_dict())
+    
     trainer = Trainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
 
     trainer.train()
     #trainer.save_state()
-    trainer.save_model(output_dir=training_args.output_dir)
+    #trainer.save_model(output_dir=training_args.output_dir)
 
     import torch.distributed as dist
     if dist.get_rank() != 0:

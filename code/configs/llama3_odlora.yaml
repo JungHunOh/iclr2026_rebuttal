@@ -1,0 +1,24 @@
+model: llama3
+base_model: meta-llama/Meta-Llama-3-8B
+method: odlora
+bs: 32
+dataset: codefeedback
+lr: 1e-4
+mini_bs: 8
+epoch: 1
+seed: 1
+target_modules: q_proj,k_proj,v_proj,down_proj,up_proj,o_proj,gate_proj
+r: [8, 32]
+scale: 4
+max_steps: 50
+lora_dropout: 0.05
+data_length: 100000
+bf16: true
+fp16: false
+per_device_eval_batch_size: 4
+eval_strategy: "no"
+save_strategy: "no"
+weight_decay: 0
+warmup_ratio: 0
+logging_steps: 1
+lr_scheduler_type: cosine

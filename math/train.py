@@ -75,6 +75,7 @@ class ModelArguments:
 @dataclass
 class DataArguments:
     data_path: str = field(default=None, metadata={"help": "Path to the training data."})
+    data_length: int = field(default=100000, metadata={"help": "Length of the training data."})
 
 
 @dataclass
@@ -84,7 +85,7 @@ class LoRAArguments:
     lora_alpha: float = field(default=None)
     lora_init: any = field(default=True)
     lora_dropout: float = field(default=0.05)
-    target_modules: List[str] = field(default_factory=lambda: ["q_proj", "k_proj", "v_proj"])
+    target_modules: str = field(default=None, metadata={"help": "Target modules to apply LoRA to, separated by commas."})
 
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
@@ -216,7 +217,21 @@ class SupervisedDataset(Dataset):
         return dict(input_ids=self.input_ids[i], labels=self.labels[i])
 
     def __getitem__(self, i):
-        return dict(input_ids=self.sources[i], labels=self.targets[i])
+        # support slicing like ds[:32] -> returns a Subset
+        if isinstance(i, slice):
+            start, stop, step = i.indices(len(self))
+            indices = list(range(start, stop, step))
+            return torch.utils.data.Subset(self, indices)
+        # support list/tuple/ndarray of indices
+        if isinstance(i, (list, tuple, np.ndarray)):
+            indices = list(i)
+            return torch.utils.data.Subset(self, indices)
+        # single index
+        if isinstance(i, int):
+            if i < 0:
+                i += len(self)
+            return dict(input_ids=self.sources[i], labels=self.targets[i])
+        raise TypeError(f"Invalid index type: {type(i)}")
 
 @dataclass
 class DataCollatorForSupervisedDataset(object):
@@ -266,12 +281,8 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer, dat
 
 
 def train():
-    #import wandb
-    #wandb.init(mode="disabled")
-
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments, LoRAArguments))
     model_args, data_args, training_args, lora_args, remaining_args = parser.parse_args_into_dataclasses(return_remaining_strings=True)
-    data_args.data_length = int(remaining_args[1])
 
     random.seed(training_args.seed)
     np.random.seed(training_args.seed)
@@ -311,22 +322,56 @@ def train():
     if 'norslora' in training_args.output_dir:
         lora_args.lora_alpha = lora_args.lora_r * 2
 
-    config = LoraConfig(
+    if 'loraga' in training_args.output_dir:
+        from lora_ga import LoraGAConfig
+        from lora_ga import get_peft_model as loraga_get_peft_model
+        from accelerate import Accelerator
+        from lora_ga.utils.lora_ga_utils import estimate_gradient, LoraGAContext
+        from torch.utils.data import DataLoader
+
+        config = LoraGAConfig(
             r=lora_args.lora_r,
             lora_alpha=lora_args.lora_alpha,
-            target_modules=lora_args.target_modules,
+            target_modules=lora_args.target_modules.split(','),
             lora_dropout=lora_args.lora_dropout,
             bias="none",
             task_type=TaskType.CAUSAL_LM,
             init_lora_weights=True if 'pissa' not in training_args.output_dir else 'pissa_niter_4',
             use_dora=True if 'dora' in training_args.output_dir else False,
             use_rslora=True if 'norslora' not in training_args.output_dir else False,
+            iters=32 // 2,
         )
+
+        temp_set = data_module['train_dataset'][:32]
+
+        named_grad = estimate_gradient(
+            model=model,
+            dataloader=DataLoader(temp_set, shuffle=False, batch_size=2, collate_fn=data_module['data_collator']),
+            accelerator=Accelerator(),
+            quant_flag=False,
+        )
+        with LoraGAContext(model=model, named_grad=named_grad):
+            model = loraga_get_peft_model(model=model, peft_config=config)
+        
+    else:
+        config = LoraConfig(
+                r=lora_args.lora_r,
+                lora_alpha=lora_args.lora_alpha,
+                target_modules=lora_args.target_modules.split(','),
+                lora_dropout=lora_args.lora_dropout,
+                bias="none",
+                task_type=TaskType.CAUSAL_LM,
+                init_lora_weights=True if 'pissa' not in training_args.output_dir else 'pissa_niter_4',
+                use_dora=True if 'dora' in training_args.output_dir else False,
+                use_rslora=True if 'norslora' not in training_args.output_dir else False,
+            )
     
-    model = get_peft_model(model, config)
+        model = get_peft_model(model, config)
+    
+        
     if 'fullft' in training_args.output_dir:
         for name, param in model.named_parameters():
-            if any(target in name for target in lora_args.target_modules):
+            if any(target in name for target in lora_args.target_modules) and 'lora' not in name:
                 param.requires_grad = True
             else:
                 param.requires_grad = False
@@ -344,6 +389,14 @@ def train():
         assert training_args.max_steps == -1
 
     training_args.max_steps = -1
+    if 'lorapro' in training_args.output_dir:
+        ds_config = "../config/deepspeed_zero2.json"
+        ds_config = os.path.abspath(os.path.expanduser(ds_config))
+        assert os.path.isfile(ds_config), f"Deepspeed config not found: {ds_config}"
+        training_args.deepspeed = ds_config
+        training_args.optim = 'sgd'
+        training_args = TrainingArguments(**training_args.to_dict())
+
     trainer = Trainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
 
     trainer.train()

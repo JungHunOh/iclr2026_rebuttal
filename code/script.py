@@ -3,7 +3,7 @@ import random
 
 gpu = input("Enter GPU ID: ")
 
-for model in ['llama3','gemma']:
+for model in ['llama3']:
 
     if model == 'gemma':
         base_model = 'google/gemma-2b'
@@ -34,7 +34,7 @@ for model in ['llama3','gemma']:
                 target_modules_name = target_modules.replace(' ', '').replace('_proj','')
                 
                 #['base', 'pissa', 'dora', 'odlora', 'norslora', 'lora+']
-                for method in ['base', 'fullft', 'odlora', 'odlorascaling']:
+                for method in ['lorapro']:
                     if 'odlora' in method or 'lorauniform' in method:
                         max_steps = 50
                     else:
