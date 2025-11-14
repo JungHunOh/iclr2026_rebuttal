@@ -1,11 +1,10 @@
 model: llama3
 base_model: meta-llama/Meta-Llama-3-8B
-method: lorapro
+method: scaledadam
 bs: 32
-dataset: metamath100k
-dataset_name: MetaMathQA-395K
+dataset: codefeedback
 lr: [1e-4, 5e-5, 2.5e-5, 1e-5]
-mini_bs: 4
+mini_bs: 8
 epoch: 1
 seed: 1
 target_modules: q_proj,k_proj,v_proj,down_proj,up_proj,o_proj,gate_proj
