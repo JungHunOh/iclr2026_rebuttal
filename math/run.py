@@ -5,6 +5,7 @@ import random
 import argparse
 import subprocess
 import sys
+import socket
 
 def run_training(config_path, gpu):
     """
@@ -57,10 +58,10 @@ def run_training(config_path, gpu):
             
             # Prepare the command
             gradient_accumulation_steps = bs // mini_bs // num_gpus
-            
+
             cmd = [
                 "python3", "-m", "torch.distributed.launch",
-                f"--master_port={random.randint(1000, 9999)}",
+                f"--master_port={find_free_port()}",
                 f"--nproc_per_node={num_gpus}",
                 "--use_env", "train.py",
                 f"--model_name_or_path={base_model}",
@@ -114,6 +115,13 @@ def main():
         sys.exit(1)
     
     run_training(args.config, args.gpu)
+
+def find_free_port():
+    s = socket.socket()
+    s.bind(('', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 if __name__ == "__main__":
     main()

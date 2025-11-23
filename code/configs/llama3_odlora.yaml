@@ -3,7 +3,7 @@ base_model: meta-llama/Meta-Llama-3-8B
 method: odlora
 bs: 32
 dataset: codefeedback
-lr: [1e-4, 5e-5, 2.5e-5, 1e-5]
+lr: [1e-4]
 mini_bs: 8
 epoch: 1
 seed: 1

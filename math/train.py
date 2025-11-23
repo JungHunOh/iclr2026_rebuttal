@@ -370,18 +370,18 @@ def train():
     
         
     if 'fullft' in training_args.output_dir:
+        for param in model.parameters():
+            param.requires_grad = False
         for name, param in model.named_parameters():
-            if any(target in name for target in lora_args.target_modules) and 'lora' not in name:
+            if any(target in name for target in lora_args.target_modules.split(',')) and 'lora' not in name:
                 param.requires_grad = True
-            else:
-                param.requires_grad = False
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total Parameters: {total_params}")
     print(f"Trainable Parameters: {trainable_params}, Ratio: {100 * trainable_params / total_params:.2f}%")
 
-    if 'odlora' in training_args.output_dir or 'lorauniform' in training_args.output_dir:
+    if 'odlora' in training_args.output_dir:
         assert training_args.max_steps > 0
         trainer = Trainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
         trainer.train()
@@ -389,13 +389,13 @@ def train():
         assert training_args.max_steps == -1
 
     training_args.max_steps = -1
-    if 'lorapro' in training_args.output_dir:
-        ds_config = "../config/deepspeed_zero2.json"
-        ds_config = os.path.abspath(os.path.expanduser(ds_config))
-        assert os.path.isfile(ds_config), f"Deepspeed config not found: {ds_config}"
-        training_args.deepspeed = ds_config
-        training_args.optim = 'sgd'
-        training_args = TrainingArguments(**training_args.to_dict())
+    # if 'lorapro' in training_args.output_dir:
+    #     ds_config = "../config/deepspeed_zero2.json"
+    #     ds_config = os.path.abspath(os.path.expanduser(ds_config))
+    #     assert os.path.isfile(ds_config), f"Deepspeed config not found: {ds_config}"
+    #     training_args.deepspeed = ds_config
+    #     training_args.optim = 'sgd'
+    #     training_args = TrainingArguments(**training_args.to_dict())
 
     trainer = Trainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
 
@@ -411,6 +411,8 @@ def train():
     import torch.distributed as dist
     if dist.get_rank() != 0:
         exit(0)
+
+    torch.cuda.empty_cache()
 
     return model, tokenizer, training_args.output_dir.split('/')[-2]
 

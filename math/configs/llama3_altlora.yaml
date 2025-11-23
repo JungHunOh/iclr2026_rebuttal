@@ -1,16 +1,17 @@
-model: gemma
-base_model: google/gemma-2b
-method: odlora
+model: llama3
+base_model: meta-llama/Meta-Llama-3-8B
+method: altlora
 bs: 32
-dataset: codefeedback
-lr: [2e-4]
-mini_bs: 16
+dataset: metamath100k
+dataset_name: MetaMathQA-395K
+lr: [1e-4]
+mini_bs: 8
 epoch: 1
 seed: 1
 target_modules: q_proj,k_proj,v_proj,down_proj,up_proj,o_proj,gate_proj
-r: [8, 32]
+r: [8,32]
 scale: 4
-max_steps: 50
+max_steps: -1
 lora_dropout: 0.05
 data_length: 100000
 bf16: true

@@ -7,7 +7,7 @@ gpu=input()
 dataset='commonsense_170k'
 
 
-for model in ['gemma']:
+for model in ['llama3']:
 
     if model == 'gemma':
         base_model = 'google/gemma-2b'
@@ -28,9 +28,9 @@ for model in ['gemma']:
 
     for seed in [1]:
         #for method in ['base', 'pissa', 'dora', 'odlora', 'norslora', 'lora+']:
-        for method in ['scaledadam']:
+        for method in ['base']:
             for r in [8]:
-                if 'odlora' in method or 'lorauniform' in method:
+                if 'odlora' in method:
                     max_steps = 55
                 else:
                     max_steps = -1
@@ -38,10 +38,10 @@ for model in ['gemma']:
                 if 'fullft' in method:
                     if model == 'llama3':
                         mini_bs = 1
-                        lr = 5e-6
+                        lr = 1e-5
                     else:
                         mini_bs = 8
-                        lr = 1e-5
+                        lr = 2e-5
                     
                 num_gpus = len(gpu.split(','))
 
@@ -70,4 +70,3 @@ for model in ['gemma']:
                 )
                 os.system(cmd)
                 print(f'./trained_models/{model}_{dataset}_lr{lr}_epoch{epoch}_bs{bs}_r{r}_scale{scale}_{method}_seed{seed}')
-input()

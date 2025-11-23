@@ -232,13 +232,16 @@ def train(
         )
 
     model = get_peft_model(model, config)
+    
     if 'fullft' in output_dir:
+        for param in model.parameters():
+            param.requires_grad = False
         for name, param in model.named_parameters():
-            if any(target in name for target in target_modules):
+            if any(target in name for target in target_modules) and 'lora' not in name:
                 param.requires_grad = True
             else:
                 param.requires_grad = False
-
+    
     if data_path.endswith(".json"):  # todo: support jsonl
         data = load_dataset("json", data_files=data_path)
     else:
@@ -283,13 +286,13 @@ def train(
     else:
         train_data = data["train"].shuffle().map(generate_and_tokenize_prompt)
         val_data = None
-
+    
     if not ddp and torch.cuda.device_count() > 1:
         # keeps Trainer from trying its own DataParallelism when more than 1 gpu is available
         model.is_parallelizable = True
         model.model_parallel = True
 
-    if ('odlora' in output_dir or 'lorauniform' in output_dir) and 'noinit' not in output_dir:
+    if 'odlora' in output_dir:
         assert max_steps > 0
         trainer = Trainer(
             model=model,
@@ -333,7 +336,7 @@ def train(
         args=transformers.TrainingArguments(
             per_device_train_batch_size=micro_batch_size,
             gradient_accumulation_steps=gradient_accumulation_steps,
-            warmup_ratio=0,
+            warmup_steps=0,
             num_train_epochs=num_epochs,
             learning_rate=learning_rate,
             fp16=False,

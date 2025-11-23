@@ -3,8 +3,8 @@ base_model: google/gemma-2b
 method: lorapro
 bs: 32
 dataset: codefeedback
-lr: [2e-4, 1e-4, 5e-5, 2e-5]
-mini_bs: 8
+lr: [2e-4]
+mini_bs: 16
 epoch: 1
 seed: 1
 target_modules: q_proj,k_proj,v_proj,down_proj,up_proj,o_proj,gate_proj

@@ -172,7 +172,9 @@ def main(model, tokenizer, dir, num_sample=1):
         for task_id in tqdm(problems, desc="Tasks")
         for _ in range(num_sample)
     ]
+
     target_name = os.path.join("experiment/codefeedback", dir , "humaneval_samples.jsonl")
+    os.makedirs(os.path.dirname(target_name), exist_ok=True)
     write_jsonl(target_name, samples)
 
 if __name__ == "__main__":

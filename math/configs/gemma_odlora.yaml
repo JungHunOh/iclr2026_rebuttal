@@ -4,7 +4,7 @@ method: odlora
 bs: 32
 dataset: metamath100k
 dataset_name: MetaMathQA-395K
-lr: [2e-4, 1e-4, 5e-5, 2e-5]
+lr: [2e-4]
 mini_bs: 16
 epoch: 1
 seed: 1

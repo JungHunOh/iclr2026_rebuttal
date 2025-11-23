@@ -4,7 +4,7 @@ method: lorapro
 bs: 32
 dataset: metamath100k
 dataset_name: MetaMathQA-395K
-lr: [1e-4, 5e-5, 2.5e-5, 1e-5]
+lr: [1e-4]
 mini_bs: 4
 epoch: 1
 seed: 1

@@ -1,17 +1,3 @@
-#    Copyright 2023 Rohan Taori, Ishaan Gulrajani, Tianyi Zhang, Yann Dubois, Xuechen Li
-#
-#    Licensed under the Apache License, Version 2.0 (the "License");
-#    you may not use this file except in compliance with the License.
-#    You may obtain a copy of the License at
-#
-#        http://www.apache.org/licenses/LICENSE-2.0
-#
-#    Unless required by applicable law or agreed to in writing, software
-#    distributed under the License is distributed on an "AS IS" BASIS,
-#    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#    See the License for the specific language governing permissions and
-#    limitations under the License.
-
 import os
 import copy
 import logging
@@ -28,7 +14,7 @@ from torch.utils.data import Dataset
 from peft import LoraConfig, get_peft_model
 
 import sys
-sys.path.append("..")  # Add parent directory to path for utils import
+sys.path.append("..")
 from trainer import CustomLoRATrainer as Trainer
 
 IGNORE_INDEX = -100
@@ -204,7 +190,24 @@ class SupervisedHFDataset(Dataset):
         targets = [f"{example['output']}{tokenizer.eos_token}" for example in hf_dataset]
 
         logging.warning("Tokenizing HuggingFace dataset inputs... This may take some time...")
-        data_dict = preprocess(sources, targets, tokenizer)
+
+        assert os.path.exists('/home/USER/.cache/huggingface/'), "Please make sure the cache directory exists."
+
+        if 'llama' in tokenizer.name_or_path.lower():
+            cache_path = '/home/USER/.cache/huggingface/code_feedback_llama_tokenized_dataset.pt'
+        else:
+            cache_path = '/home/USER/.cache/huggingface/code_feedback_tokenized_dataset.pt'
+
+        if os.path.exists(cache_path):
+            logging.warning(f"Loading tokenized data from cache: {cache_path}")
+            data_dict = torch.load(cache_path)
+        else:
+            logging.warning(f"No cache found. Tokenizing and saving to: {cache_path}")
+            data_dict = preprocess(sources, targets, tokenizer)
+            try:
+                torch.save(data_dict, cache_path)
+            except Exception as e:
+                logging.warning(f"Failed to write cache ({cache_path}): {e}")
 
         self.input_ids = data_dict["input_ids"]
         self.labels = data_dict["labels"]
@@ -358,8 +361,10 @@ def train():
         model = get_peft_model(model, lora_config)
 
     if 'fullft' in training_args.output_dir:
+        for param in model.parameters():
+            param.requires_grad = False
         for name, param in model.named_parameters():
-            if any(target in name for target in model_args.target_modules) and 'lora' not in name:
+            if any(target in name for target in model_args.target_modules.split(',')) and 'lora' not in name:
                 param.requires_grad = True
             else:
                 param.requires_grad = False
@@ -369,27 +374,18 @@ def train():
     print(f"Total Parameters: {total_params}")
     print(f"Trainable Parameters: {trainable_params}, Ratio: {100 * trainable_params / total_params:.2f}%")
         
-    if 'odlora' in training_args.output_dir or 'lorauniform' in training_args.output_dir:
+    if 'odlora' in training_args.output_dir:
         assert training_args.max_steps > 0
+        # initialization phase
         trainer = Trainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
         trainer.train()
     else:
         assert training_args.max_steps == -1
 
     training_args.max_steps = -1
-    if 'lorapro' in training_args.output_dir:
-        ds_config = "../config/deepspeed_zero2.json"
-        ds_config = os.path.abspath(os.path.expanduser(ds_config))
-        assert os.path.isfile(ds_config), f"Deepspeed config not found: {ds_config}"
-        training_args.deepspeed = ds_config
-        training_args.optim = 'sgd'
-        training_args = TrainingArguments(**training_args.to_dict())
-    
-    trainer = Trainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
 
+    trainer = Trainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
     trainer.train()
-    #trainer.save_state()
-    #trainer.save_model(output_dir=training_args.output_dir)
 
     import torch.distributed as dist
     if dist.get_rank() != 0:
@@ -397,19 +393,13 @@ def train():
     else:
         model.eval()
 
-        if data_args.dataset == 'codefeedback':
-            from eval_humaneval import main as eval_humaneval
-            import os
-            eval_humaneval(model, tokenizer, training_args.output_dir.split('/')[-1])
+        from eval_humaneval import main as eval_humaneval
+        import os
+        eval_humaneval(model, tokenizer, training_args.output_dir.split('/')[-2])
 
-            dir = os.path.join(training_args.output_dir, "humaneval_samples.jsonl")
+        dir = os.path.join('./experiment/codefeedback',training_args.output_dir.split('/')[-2], "humaneval_samples.jsonl")
 
-            os.system(f"python eval_human.py {dir}")
-        elif data_args.dataset == "alpaca":
-            #import eval_mmlu
-            #eval_mmlu.main(model, tokenizer, training_args.output_dir)
-            from alpaca_eval import eval
-            eval(model, tokenizer, training_args.output_dir)
+        os.system(f"python eval_human.py {dir}")
 
 if __name__ == "__main__":
     train()
